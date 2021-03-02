@@ -16,43 +16,41 @@ package clickhouse
 
 import (
 	"context"
-	sqlmodule "database/sql"
+	databasesql "database/sql"
 	"fmt"
 	"time"
 
-	log "github.com/golang/glog"
-	// log "k8s.io/klog"
+	log "github.com/altinity/clickhouse-operator/pkg/announcer"
 
 	_ "github.com/mailru/go-clickhouse"
 )
 
 type CHConnection struct {
 	params *CHConnectionParams
-	conn   *sqlmodule.DB
+	conn   *databasesql.DB
 }
 
 func NewConnection(params *CHConnectionParams) *CHConnection {
-	// DO not perform connection immediately, do it in lazy manner
+	// Do not establish connection immediately, do it in a lazy manner
 	return &CHConnection{
 		params: params,
 	}
 }
 
 func (c *CHConnection) connect() {
-
-	log.V(2).Infof("Establishing connection: %s", c.params.GetDSNWithHiddenCredentials())
-	dbConnection, err := sqlmodule.Open("clickhouse", c.params.GetDSN())
+	log.V(2).Info("Establishing connection: %s", c.params.GetDSNWithHiddenCredentials())
+	dbConnection, err := databasesql.Open("clickhouse", c.params.GetDSN())
 	if err != nil {
-		log.V(1).Infof("FAILED Open(%s) %v", c.params.GetDSNWithHiddenCredentials(), err)
+		log.V(1).A().Error("FAILED Open(%s). Err: %v", c.params.GetDSNWithHiddenCredentials(), err)
 		return
 	}
 
 	// Ping should be deadlined
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(defaultTimeout))
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(c.params.timeout))
 	defer cancel()
 
 	if err := dbConnection.PingContext(ctx); err != nil {
-		log.V(1).Infof("FAILED Ping(%s) %v", c.params.GetDSNWithHiddenCredentials(), err)
+		log.V(1).A().Error("FAILED Ping(%s). Err: %v", c.params.GetDSNWithHiddenCredentials(), err)
 		_ = dbConnection.Close()
 		return
 	}
@@ -62,7 +60,7 @@ func (c *CHConnection) connect() {
 
 func (c *CHConnection) ensureConnected() bool {
 	if c.conn != nil {
-		log.V(2).Infof("Already connected: %s", c.params.GetDSNWithHiddenCredentials())
+		log.V(2).F().Info("Already connected: %s", c.params.GetDSNWithHiddenCredentials())
 		return true
 	}
 
@@ -71,46 +69,18 @@ func (c *CHConnection) ensureConnected() bool {
 	return c.conn != nil
 }
 
-// Query
-type Query struct {
-	ctx        context.Context
-	cancelFunc context.CancelFunc
-
-	Rows *sqlmodule.Rows
-}
-
-// Close
-func (q *Query) Close() {
-	if q == nil {
-		return
-	}
-
-	if q.Rows != nil {
-		err := q.Rows.Close()
-		q.Rows = nil
-		if err != nil {
-			log.V(1).Infof("UNABLE to close rows. err: %v", err)
-		}
-	}
-
-	if q.cancelFunc != nil {
-		q.cancelFunc()
-		q.cancelFunc = nil
-	}
-}
-
 // Query runs given sql query
 func (c *CHConnection) Query(sql string) (*Query, error) {
 	if len(sql) == 0 {
 		return nil, nil
 	}
 
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(defaultTimeout))
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(c.params.timeout))
 
 	if !c.ensureConnected() {
 		cancel()
 		s := fmt.Sprintf("FAILED connect(%s) for SQL: %s", c.params.GetDSNWithHiddenCredentials(), sql)
-		log.V(1).Info(s)
+		log.V(1).A().Error(s)
 		return nil, fmt.Errorf(s)
 	}
 
@@ -118,17 +88,13 @@ func (c *CHConnection) Query(sql string) (*Query, error) {
 	if err != nil {
 		cancel()
 		s := fmt.Sprintf("FAILED Query(%s) %v for SQL: %s", c.params.GetDSNWithHiddenCredentials(), err, sql)
-		log.V(1).Info(s)
+		log.V(1).A().Error(s)
 		return nil, err
 	}
 
-	log.V(2).Infof("clickhouse.QueryContext():'%s'", sql)
+	log.V(2).Info("clickhouse.QueryContext():'%s'", sql)
 
-	return &Query{
-		ctx:        ctx,
-		cancelFunc: cancel,
-		Rows:       rows,
-	}, nil
+	return NewQuery(ctx, cancel, rows), nil
 }
 
 // Exec runs given sql query
@@ -137,23 +103,23 @@ func (c *CHConnection) Exec(sql string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(defaultTimeout))
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(c.params.timeout))
 	defer cancel()
 
 	if !c.ensureConnected() {
 		s := fmt.Sprintf("FAILED connect(%s) for SQL: %s", c.params.GetDSNWithHiddenCredentials(), sql)
-		log.V(1).Info(s)
+		log.V(1).A().Error(s)
 		return fmt.Errorf(s)
 	}
 
 	_, err := c.conn.ExecContext(ctx, sql)
 
 	if err != nil {
-		log.V(1).Infof("FAILED Exec(%s) %v for SQL: %s", c.params.GetDSNWithHiddenCredentials(), err, sql)
+		log.V(1).A().Error("FAILED Exec(%s) %v for SQL: %s", c.params.GetDSNWithHiddenCredentials(), err, sql)
 		return err
 	}
 
-	log.V(2).Infof("clickhouse.Exec():\n", sql)
+	log.V(2).F().Info("\n%s", sql)
 
 	return nil
 }
